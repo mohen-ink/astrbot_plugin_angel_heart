@@ -2274,6 +2274,29 @@ class FrontDesk:
             f"AngelHeart[{chat_id}]: LLM请求体已重构，采用'完整上下文+聚焦指令'模式。"
         )
 
+        # 调试模式：记录主脑完整请求体到 context_debug.txt
+        try:
+            cm = self.config_manager.for_chat(chat_id) if self.config_manager else None
+            if cm and cm.log_context_to_file:
+                import datetime
+                import json
+                from pathlib import Path
+                log_path = Path(__file__).parent.parent / "context_debug.txt"
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n{'='*30} [2. 主脑最终回复上下文] {'='*30}\n")
+                    f.write(f"时间: {now_str} | 会话: {chat_id}\n")
+                    f.write(f"System Prompt:\n{getattr(req, 'system_prompt', '')}\n")
+                    f.write(f"{'-'*75}\n")
+                    f.write("历史上下文链 (Contexts):\n")
+                    for idx, ctx in enumerate(getattr(req, "contexts", [])):
+                        f.write(f"[{idx + 1}] {json.dumps(ctx, ensure_ascii=False)}\n")
+                    f.write(f"{'-'*75}\n")
+                    f.write(f"当前指令 (Prompt):\n{getattr(req, 'prompt', '')}\n")
+                    f.write(f"{'='*75}\n\n")
+        except Exception as e:
+            logger.warning(f"AngelHeart[{chat_id}]: 写入主脑调试上下文失败: {e}")
+
     @config_manager.setter
     def config_manager(self, value):
         self._config_manager = value

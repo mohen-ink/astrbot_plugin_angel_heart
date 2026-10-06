@@ -137,13 +137,22 @@ class LLMAnalyzer:
         """
         调用AI模型并返回响应文本，包含3秒后自动重试1次机制
         """
-        # 3. 如果启用了提示词日志增强，则记录最终构建的完整提示词
-        if False:  # prompt_logging_enabled 已废弃
-            logger.info(
-                f"[AngelHeart][{chat_id}]:最终构建的完整提示词 ----------------"
-            )
-            logger.info(prompt)
-            logger.info("----------------------------------------")
+        # 调试模式：记录完整提示词到 context_debug.txt
+        try:
+            cm = self.config_manager.for_chat(chat_id) if self.config_manager else None
+            if cm and cm.log_context_to_file:
+                import datetime
+                from pathlib import Path
+                log_path = Path(__file__).parent.parent / "context_debug.txt"
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n{'='*30} [1. 秘书分析 Prompt] {'='*30}\n")
+                    f.write(f"时间: {now_str} | 会话: {chat_id}\n")
+                    f.write(f"{'-'*75}\n")
+                    f.write(prompt.strip() + "\n")
+                    f.write(f"{'='*75}\n\n")
+        except Exception as e:
+            logger.warning(f"AngelHeart分析器: 写入调试提示词失败: {e}")
 
         # 动态获取 provider
         provider = self.context.get_provider_by_id(self.analyzer_model_name)

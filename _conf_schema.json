@@ -343,5 +343,19 @@
         "default": false
       }
     }
+  },
+
+  "debug": {
+    "type": "object",
+    "description": "[调试选项] 上下文与提示词调试",
+    "hint": "用于观察每次发送给大模型与分析模型的真实提示词和上下文内容。",
+    "items": {
+      "log_context_to_file": {
+        "type": "bool",
+        "description": "记录完整上下文到文件",
+        "hint": "开启后，会将发给秘书小模型的分析 Prompt 和发给主模型的完整请求体实时追加记录到插件目录下的 context_debug.txt 中。",
+        "default": false
+      }
+    }
   }
 }

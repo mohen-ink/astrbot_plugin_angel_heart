@@ -306,6 +306,12 @@ class ConfigManager:
     def strip_period_before_newline(self) -> bool:
         return self._get_grouped("output_rewrite", "strip_period_before_newline", False)
 
+    # ========== debug ==========
+
+    @property
+    def log_context_to_file(self) -> bool:
+        return bool(self._get_grouped("debug", "log_context_to_file", False))
+
     # ========== 工具方法 ==========
 
     def get_config_summary(self) -> dict:
