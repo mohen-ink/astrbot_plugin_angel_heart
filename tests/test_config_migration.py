@@ -57,6 +57,32 @@ def test_migration_moves_debug_group_to_output_rewrite(tmp_path, monkeypatch):
     assert migrated["output_rewrite"] == {"strip_markdown_enabled": False}
 
 
+def test_migration_preserves_active_debug_options(tmp_path, monkeypatch):
+    """当前仍生效的调试开关不能在插件重载迁移时被删除。"""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "debug": {
+                    "log_context_to_file": True,
+                    "trace_enabled": True,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_migration, "_find_config_path", lambda: str(config_path))
+
+    config_migration.run_migration()
+
+    migrated = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    assert migrated["debug"] == {
+        "log_context_to_file": True,
+        "trace_enabled": True,
+    }
+
+
 def test_migration_flat_debug_mode_is_removed(tmp_path, monkeypatch):
     """扁平 debug_mode 直接废弃删除，不再迁移。"""
     config_path = tmp_path / "config.json"

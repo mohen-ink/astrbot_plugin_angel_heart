@@ -48,6 +48,20 @@ async def _get_json() -> Dict:
     return data if isinstance(data, dict) else {}
 
 
+def _get_query_arg(name: str, default: str = "") -> str:
+    """读取查询参数，兼容 AstrBot Web API 与 Quart request 代理。"""
+    for attr_name in ("args", "query_params"):
+        try:
+            params = getattr(request, attr_name, None)
+            getter = getattr(params, "get", None)
+            if callable(getter):
+                value = getter(name, default)
+                return default if value is None else str(value)
+        except Exception:
+            continue
+    return default
+
+
 class ProfileAPI:
     """模板 CRUD 与群聊绑定 API。"""
 
@@ -318,12 +332,16 @@ class ProfileAPI:
     async def list_traces(self):
         if self.trace_store is None:
             return _ok([])
-        chat_id = str(request.args.get("chat_id", "") or "").strip()
         try:
-            limit = int(request.args.get("limit", "50"))
-        except (TypeError, ValueError):
-            limit = 50
-        return _ok(self.trace_store.list(chat_id=chat_id, limit=limit))
+            chat_id = _get_query_arg("chat_id").strip()
+            try:
+                limit = int(_get_query_arg("limit", "50"))
+            except (TypeError, ValueError):
+                limit = 50
+            return _ok(self.trace_store.list(chat_id=chat_id, limit=limit))
+        except Exception as e:
+            logger.error("AngelHeart: 读取 Agent 链路列表失败", exc_info=True)
+            return _err(f"读取链路记录失败: {e}", 500)
 
     async def get_trace(self, trace_id: str):
         if self.trace_store is None:

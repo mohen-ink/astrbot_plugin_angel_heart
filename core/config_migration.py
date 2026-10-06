@@ -144,7 +144,7 @@ def run_migration():
         and any(sub_key in config[group_name] for sub_key in sub_keys)
         for group_name, sub_keys in _DEPRECATED_GROUPED_KEYS.items()
     )
-    # 旧 debug 分组整体改名 output_rewrite（调试模式已删除）
+    # 旧 debug 分组中的 strip_markdown_enabled 需要迁移；当前调试开关要保留。
     has_debug_group = isinstance(config.get("debug"), dict)
     if (
         not needs_migration
@@ -193,10 +193,14 @@ def run_migration():
         if not group_config:
             del config[group_name]
 
-    # 旧 debug 分组整体改名 output_rewrite：strip_markdown_enabled 保留，debug_mode 丢弃
+    # 兼容旧 debug 分组：strip_markdown_enabled 迁移到 output_rewrite，
+    # 但当前仍在使用的调试字段必须保留，避免插件重载时被迁移逻辑清掉。
     if has_debug_group:
-        debug_group = config.pop("debug")
-        if isinstance(debug_group, dict):
+        debug_group = config.get("debug")
+        if not isinstance(debug_group, dict):
+            del config["debug"]
+            removed_count += 1
+        else:
             output_group = config.setdefault("output_rewrite", {})
             if not isinstance(output_group, dict):
                 output_group = {}
@@ -209,9 +213,15 @@ def run_migration():
                     "strip_markdown_enabled"
                 ]
                 migrated_count += 1
+                del debug_group["strip_markdown_enabled"]
             if not output_group:
                 del config["output_rewrite"]
-            removed_count += 1
+            if "debug_mode" in debug_group:
+                del debug_group["debug_mode"]
+                removed_count += 1
+            if not debug_group:
+                del config["debug"]
+                removed_count += 1
 
     if migrated_count > 0 or removed_count > 0:
         try:

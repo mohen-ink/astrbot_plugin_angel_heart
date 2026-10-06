@@ -149,20 +149,31 @@ class TraceStore:
             )
             if chat_id:
                 entries = [item for item in entries if item.get("chat_id") == chat_id]
-            return [
-                {
-                    "trace_id": item["trace_id"],
-                    "chat_id": item["chat_id"],
-                    "message_id": item["message_id"],
-                    "summary": item["summary"],
-                    "created_at": item["created_at"],
-                    "updated_at": item["updated_at"],
-                    "status": item["status"],
-                    "stage_count": len(item["stages"]),
-                    "last_stage": item["stages"][-1]["stage"] if item["stages"] else "",
-                }
-                for item in entries[:limit]
-            ]
+            summaries = []
+            for item in entries[:limit]:
+                stages = item.get("stages")
+                if not isinstance(stages, list):
+                    stages = []
+                summaries.append(
+                    {
+                        "trace_id": str(item.get("trace_id") or ""),
+                        "chat_id": str(item.get("chat_id") or ""),
+                        "message_id": str(item.get("message_id") or ""),
+                        "summary": str(item.get("summary") or ""),
+                        "created_at": item.get("created_at", 0),
+                        "updated_at": item.get("updated_at", 0),
+                        "status": str(item.get("status") or "running"),
+                        "stage_count": len(stages),
+                        "last_stage": (
+                            str(stages[-1].get("stage") or "")
+                            if isinstance(stages[-1], dict)
+                            else ""
+                        )
+                        if stages
+                        else "",
+                    }
+                )
+            return summaries
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
