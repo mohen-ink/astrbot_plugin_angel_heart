@@ -40,6 +40,7 @@ from .core.utils.message_utils import (
 )
 from .core.angel_heart_context import AngelHeartContext
 from .core.chat_profile import ChatProfileStore
+from .core.trace_store import TraceStore
 from .core.runtime_task_tracker import RuntimeTaskTracker, track_runtime_handler
 from .tools.image_understanding import AngelDescribeImageTool
 
@@ -88,6 +89,9 @@ class AngelHeartPlugin(Star):
         # -- 每群最近一次秘书决策（供 WebUI 状态栏）--
         from .core.last_decisions import LastDecisionStore
         self.last_decisions = LastDecisionStore(plugin_data_dir)
+        self.trace_store = TraceStore(
+            plugin_data_dir, enabled=lambda: self.config_manager.trace_enabled
+        )
 
         # -- 创建 AngelHeartContext 全局上下文（包含 ConversationLedger）--
         self.angel_context = AngelHeartContext(self.config_manager, self.context, plugin_data_dir)
@@ -107,6 +111,9 @@ class AngelHeartPlugin(Star):
         self.front_desk = FrontDesk(self.config_manager, self.angel_context)
         self.front_desk.chat_sources = self.chat_sources
         self.front_desk.last_decisions = self.last_decisions
+        self.front_desk.trace_store = self.trace_store
+        self.secretary.trace_store = self.trace_store
+        self.secretary.llm_analyzer.trace_store = self.trace_store
 
         # 建立必要的相互引用
         self.front_desk.secretary = self.secretary
@@ -124,6 +131,7 @@ class AngelHeartPlugin(Star):
                 self.angel_context.debounce_manager,
                 self.last_decisions,
                 config=self.config,
+                trace_store=self.trace_store,
                 plugin=self,
             )
             logger.info("AngelHeart: 已注册群聊配置 WebUI API 路由")
@@ -143,12 +151,33 @@ class AngelHeartPlugin(Star):
     ) -> None:
         """智能回复员 - 事件入口：处理缓存或在唤醒时清空缓存"""
 
-        # 使用 _should_process 方法来判断是否需要处理此消息
-        if not self._should_process(event):
-            # 如果 _should_process 返回 False，直接返回，不进行任何处理
+        chat_id = event.unified_msg_origin
+        message_id = str(getattr(getattr(event, "message_obj", None), "message_id", "") or "")
+        trace_id = ""
+        if self.config_manager.trace_enabled:
+            trace_id = self.trace_store.new_trace_id()
+            if hasattr(event, "set_extra"):
+                event.set_extra("angelheart_trace_id", trace_id)
+            self.trace_store.create(
+                trace_id,
+                chat_id,
+                message_id,
+                event.get_message_outline() or "",
+            )
+
+        should_process = self._should_process(event)
+        if trace_id:
+            self.trace_store.append(
+                trace_id,
+                "precheck",
+                "前置检查",
+                status="passed" if should_process else "blocked",
+                data={"accepted": should_process},
+                terminal=not should_process,
+            )
+        if not should_process:
             return
 
-        # 如果是需要处理的消息，则委托给前台缓存
         await self.front_desk.handle_event(event)
 
     @filter.on_llm_request(priority=0)
@@ -195,6 +224,12 @@ class AngelHeartPlugin(Star):
         if self.config_manager.whitelist_enabled:
             plain_chat_id = self._get_plain_chat_id(chat_id)
             if plain_chat_id not in self._whitelist_cache:
+                self.front_desk._trace(
+                    event,
+                    "prompt_rewrite_skipped",
+                    "会话不在上下文接管白名单",
+                    status="skipped",
+                )
                 return
 
         if self._is_private_chat(chat_id):
@@ -202,11 +237,17 @@ class AngelHeartPlugin(Star):
                 logger.debug(
                     f"AngelHeart[{chat_id}]: 私聊上下文接管未启用，跳过请求体重写。"
                 )
+                self.front_desk._trace(
+                    event, "prompt_rewrite_skipped", "私聊上下文接管未启用", status="skipped"
+                )
                 return
         else:
             if not self.config_manager.group_chat_enhancement:
                 logger.debug(
                     f"AngelHeart[{chat_id}]: 群聊上下文接管未启用，跳过请求体重写。"
+                )
+                self.front_desk._trace(
+                    event, "prompt_rewrite_skipped", "群聊上下文接管未启用", status="skipped"
                 )
                 return
 
@@ -258,11 +299,27 @@ class AngelHeartPlugin(Star):
             self.angel_context.conversation_ledger.add_messages(
                 chat_id, ledger_messages
             )
+            self.front_desk._trace(
+                event,
+                "agent_completed",
+                "Agent 与工具调用完成",
+                status="completed",
+                data={"messages": ledger_messages, "response": getattr(response, "completion_text", "")},
+                terminal=True,
+            )
 
             logger.debug(
                 f"AngelHeart[{chat_id}]: 已在完成点记录 {len(ledger_messages)} 条完整 assistant/tool 消息"
             )
         except Exception as e:
+            self.front_desk._trace(
+                event,
+                "agent_error",
+                "Agent 完成回调异常",
+                status="error",
+                data={"error": str(e)},
+                terminal=True,
+            )
             logger.error(
                 f"AngelHeart[{chat_id}]: 完成点记录 assistant/tool 链失败: {e}",
                 exc_info=True,
@@ -606,6 +663,15 @@ class AngelHeartPlugin(Star):
                     if not work_id:
                         work_id = self.front_desk._get_event_message_id(event)
                     preview = self._extract_sent_message_content(event)
+                    if self.config_manager.trace_enabled:
+                        self.front_desk._trace(
+                            event,
+                            "sent",
+                            "回复已发送",
+                            status="sent",
+                            data={"response": preview, "leave_reply": bool(leave_reply_trigger)},
+                            terminal=True,
+                        )
                     if len(preview) > 80:
                         preview = preview[:80] + "…"
                     self.angel_context.work_ledger.complete_work(
@@ -620,6 +686,15 @@ class AngelHeartPlugin(Star):
                     )
             else:
                 logger.debug(f"AngelHeart[{chat_id}]: 未检测到实际消息发送，跳过状态转换")
+                if self.config_manager.trace_enabled:
+                    self.front_desk._trace(
+                        event,
+                        "not_sent",
+                        "本轮未发送消息",
+                        status="not_sent",
+                        data={"reason": "empty_reply_or_not_sent"},
+                        terminal=True,
+                    )
                 try:
                     work_id = ""
                     if hasattr(event, "get_extra"):
@@ -647,6 +722,15 @@ class AngelHeartPlugin(Star):
                         f"AngelHeart[{chat_id}]: 空回复收口秘书调度失败: {e}"
                     )
         except Exception as e:
+            if self.config_manager.trace_enabled:
+                self.front_desk._trace(
+                    event,
+                    "send_error",
+                    "发送后处理异常",
+                    status="error",
+                    data={"error": str(e)},
+                    terminal=True,
+                )
             logger.error(
                 f"AngelHeart[{chat_id}]: after_message_sent处理异常: {e}",
                 exc_info=True,

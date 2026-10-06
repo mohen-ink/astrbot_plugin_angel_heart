@@ -355,6 +355,12 @@
         "description": "记录完整上下文到文件",
         "hint": "开启后，会将发给秘书小模型的分析 Prompt 和发给主模型的完整请求体实时追加记录到插件目录下的 context_debug.txt 中。",
         "default": false
+      },
+      "trace_enabled": {
+        "type": "bool",
+        "description": "启用 Agent 全链路追踪",
+        "hint": "开启后，在 WebUI 链路追踪页保存最近 100 轮的事件、判断、请求与响应过程；提示词和上下文可能包含聊天内容，请谨慎开启。",
+        "default": false
       }
     }
   }

@@ -107,12 +107,24 @@ class FrontDesk:
 
         # 最近决策存储（每群最近一条，供 WebUI 状态栏）；由 main.py 注入
         self.last_decisions = None
+        self.trace_store = None
 
         # secretary 引用将由 main.py 设置
         self.secretary = None
 
         # 私聊摘要是插件自建后台任务，必须登记，供去重与 terminate 完整取消。
         self._private_compression_tasks: Dict[str, asyncio.Task] = {}
+
+    def _trace(self, event: AstrMessageEvent, stage: str, title: str, **kwargs) -> None:
+        """向当前事件的运行链路追加一个阶段。"""
+        if self.trace_store is None or not hasattr(event, "get_extra"):
+            return
+        try:
+            trace_id = str(event.get_extra("angelheart_trace_id", "") or "")
+            if trace_id:
+                self.trace_store.append(trace_id, stage, title, **kwargs)
+        except Exception as e:
+            logger.debug(f"AngelHeart: 追加链路阶段失败: {e}")
 
     def _get_event_message_id(self, event: AstrMessageEvent) -> str:
         """读取 AstrBot 当前入站消息 ID。"""
@@ -438,6 +450,12 @@ class FrontDesk:
         }
         # 6. 将消息添加到 Ledger。上下文清理由压缩策略统一控制，不再因离场状态触发。
         self.context.conversation_ledger.add_message(chat_id, new_message)
+        self._trace(
+            event,
+            "ledger",
+            "消息写入对话账本",
+            data={"message_id": source_message_id, "message": new_message},
+        )
 
         # 7. 登记来源（供 WebUI 认群）：群聊取群名，私聊取发送者昵称，均为上游同步字段。
         self._record_chat_source(chat_id, event)
@@ -486,6 +504,13 @@ class FrontDesk:
 
             # 1. 基本合法性检查 (最高优先级)
             if not message_content.strip():
+                self._trace(
+                    event,
+                    "blocked",
+                    "空消息，跳过处理",
+                    status="blocked",
+                    terminal=True,
+                )
                 logger.debug(f"AngelHeart[{chat_id}]: 空消息，跳过处理")
                 return
 
@@ -510,6 +535,14 @@ class FrontDesk:
                             break
                 if muted:
                     remaining = self.context.silenced_until[chat_id] - current_time
+                    self._trace(
+                        event,
+                        "blocked",
+                        "处于闭嘴状态，事件终止",
+                        status="blocked",
+                        data={"remaining_seconds": remaining},
+                        terminal=True,
+                    )
                     logger.info(
                         f"AngelHeart[{chat_id}]: 处于闭嘴状态 (剩余 {remaining:.1f} 秒)，事件已终止。"
                     )
@@ -529,6 +562,14 @@ class FrontDesk:
                     for word in slap_words:
                         if word in message_content:
                             silence_duration = cm.silence_duration
+                            self._trace(
+                                event,
+                                "blocked",
+                                "命中掌嘴词，进入闭嘴模式",
+                                status="blocked",
+                                data={"trigger": word, "silence_duration": silence_duration},
+                                terminal=True,
+                            )
                             self.context.silenced_until[chat_id] = (
                                 current_time + silence_duration
                             )
@@ -545,6 +586,14 @@ class FrontDesk:
             await self.cache_message(chat_id, event)
 
             if event.get_extra("angelheart_blocked_by_provider_wake_prefix", False):
+                self._trace(
+                    event,
+                    "blocked",
+                    "未命中上游聊天唤醒前缀",
+                    status="blocked" if cm.block_unapproved_wake_non_command else "skipped",
+                    data={"stop_event": bool(cm.block_unapproved_wake_non_command)},
+                    terminal=bool(cm.block_unapproved_wake_non_command),
+                )
                 logger.debug(
                     f"AngelHeart[{chat_id}]: 事件未命中额外聊天唤醒前缀，已缓存但跳过秘书分析。"
                 )
@@ -558,6 +607,12 @@ class FrontDesk:
             # 私聊由主框架直接响应，这里只负责缓存，不走秘书/双防抖链路
             # 根因：AstrBot 无法在子代理中注入消息，私聊忙碌时只能队列
             if self._is_private_chat(chat_id):
+                self._trace(
+                    event,
+                    "private_handoff",
+                    "私聊交给 AstrBot 主框架",
+                    status="handed_off",
+                )
                 logger.debug(
                     f"AngelHeart[{chat_id}]: 私聊消息已缓存，跳过秘书与双防抖，等待主框架队列/直接响应。"
                 )
@@ -573,6 +628,14 @@ class FrontDesk:
             await self._schedule_group_debounce(event)
 
         except Exception as e:
+            self._trace(
+                event,
+                "error",
+                "前台事件处理异常",
+                status="error",
+                data={"error": str(e)},
+                terminal=True,
+            )
             logger.error(f"AngelHeart[{chat_id}]: 前台事件处理异常: {e}", exc_info=True)
             # 发生异常时，终止事件传播
             event.stop_event()
@@ -594,6 +657,18 @@ class FrontDesk:
         leave_reply_trigger = ""
         if not can_enter and not is_present:
             leave_reply_trigger = self.status_checker.get_leave_reply_trigger(chat_id)
+        self._trace(
+            event,
+            "routing",
+            "群聊状态与触发判定",
+            data={
+                "status": self.context.get_chat_status(chat_id).value,
+                "is_wake": is_wake,
+                "is_present": is_present,
+                "can_enter": can_enter,
+                "leave_reply_trigger": leave_reply_trigger,
+            },
+        )
 
         # 离场进场：先标记进场，再进入助理防抖
         if can_enter and not is_present:
@@ -629,17 +704,38 @@ class FrontDesk:
             leave_reply_trigger=leave_reply_trigger,
         )
 
+        self._trace(
+            event,
+            "debounce_scheduled",
+            "群聊防抖调度",
+            data={"ticket_created": ticket is not None, "message_id": message_id},
+        )
         if ticket is None:
             # 只入库，不激活
             logger.debug(
                 f"AngelHeart[{chat_id}]: 消息仅入库，不激活事件 "
                 f"(wake={is_wake}, present={is_present}, sender={sender_id})"
             )
+            self._trace(
+                event,
+                "debounce",
+                "仅入账，未激活",
+                status="blocked",
+                data={"wake": is_wake, "present": is_present},
+                terminal=True,
+            )
             event.stop_event()
             return
 
         result = await ticket
         if result == KILL:
+            self._trace(
+                event,
+                "debounce",
+                "防抖旧事件被替换",
+                status="killed",
+                terminal=True,
+            )
             logger.debug(f"AngelHeart[{chat_id}]: 防抖旧事件被替换，停止当前事件")
             result_obj = event.get_result()
             if result_obj:
@@ -648,9 +744,25 @@ class FrontDesk:
             return
 
         if result != PROCESS:
+            self._trace(
+                event,
+                "debounce",
+                "未知防抖结果",
+                status="blocked",
+                data={"result": str(result)},
+                terminal=True,
+            )
             logger.warning(f"AngelHeart[{chat_id}]: 未知防抖结果 '{result}'，停止事件")
             event.stop_event()
             return
+
+        self._trace(
+            event,
+            "debounce",
+            "防抖放行",
+            status="released",
+            data={"result": result},
+        )
 
         # 激活：重建上下文后进入秘书/主脑
         try:
@@ -856,6 +968,14 @@ class FrontDesk:
             else:
                 decision = await self.secretary.handle_message_by_state(event)
 
+            if leave_reply_trigger:
+                self._trace(
+                    event,
+                    "leave_reply",
+                    "离场应答策略",
+                    status="reply",
+                    data={"trigger": leave_reply_trigger, "decision": decision.model_dump() if decision else None},
+                )
             if decision and decision.should_reply:
                 logger.info(
                     f"AngelHeart[{chat_id}]: 秘书决策 action=reply "
@@ -910,6 +1030,14 @@ class FrontDesk:
                 reason="no_reply" if decision else "no_decision",
             )
 
+            self._trace(
+                event,
+                "not_replied",
+                "秘书决定不回复",
+                status="no_reply",
+                data={"decision": decision.model_dump() if decision else None},
+                terminal=True,
+            )
             # 不回复时停止事件，避免继续进入主脑
             event.stop_event()
         except Exception as e:
@@ -917,6 +1045,14 @@ class FrontDesk:
             logger.error(
                 f"AngelHeart[{chat_id}]: 调用秘书异常 (message_id={message_id}): {e}",
                 exc_info=True,
+            )
+            self._trace(
+                event,
+                "error",
+                "秘书处理异常，回退放行主脑",
+                status="error",
+                data={"error": str(e), "message_id": message_id},
+                terminal=True,
             )
             try:
                 self.context.work_ledger.complete_work(
@@ -1013,6 +1149,14 @@ class FrontDesk:
                     },
                     ensure_ascii=False,
                 )
+
+            self._trace(
+                event,
+                "reply_handoff",
+                "秘书放行主脑",
+                status="reply",
+                data={"decision": decision.model_dump(), "context": full_snapshot},
+            )
 
             # 决策门闩：要回就唤醒主脑
             try:
@@ -2272,6 +2416,17 @@ class FrontDesk:
 
         logger.debug(
             f"AngelHeart[{chat_id}]: LLM请求体已重构，采用'完整上下文+聚焦指令'模式。"
+        )
+        self._trace(
+            event,
+            "main_request",
+            "主脑最终请求上下文",
+            data={
+                "system_prompt": getattr(req, "system_prompt", ""),
+                "contexts": getattr(req, "contexts", []),
+                "prompt": getattr(req, "prompt", ""),
+                "image_url_count": len(current_image_urls) + len(extra_image_urls),
+            },
         )
 
         # 调试模式：记录主脑完整请求体到 context_debug.txt

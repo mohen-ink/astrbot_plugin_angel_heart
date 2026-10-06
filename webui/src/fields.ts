@@ -145,3 +145,27 @@ export interface ChatStatusItem {
     summary: string
   } | null
 }
+
+export interface TraceSummary {
+  trace_id: string
+  chat_id: string
+  message_id: string
+  summary: string
+  created_at: number
+  updated_at: number
+  status: string
+  stage_count: number
+  last_stage: string
+}
+
+export interface TraceStage {
+  at: number
+  stage: string
+  title: string
+  status: string
+  data: unknown
+}
+
+export interface TraceDetail extends TraceSummary {
+  stages: TraceStage[]
+}

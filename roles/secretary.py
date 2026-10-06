@@ -35,6 +35,7 @@ class Secretary:
         self._config_manager = config_manager
         self.context = context
         self.angel_context = angel_context
+        self.trace_store = None
         # -- 核心组件 --
         # 初始化 LLMAnalyzer
         analyzer_model_name = self.config_manager.analyzer_model
@@ -43,6 +44,7 @@ class Secretary:
         self.llm_analyzer = LLMAnalyzer(
             analyzer_model_name, context, reply_strategy_guide, self.config_manager
         )
+        self.llm_analyzer.trace_store = None
 
     async def handle_message_by_state(self, event: AstrMessageEvent) -> SecretaryDecision:
         """
@@ -78,12 +80,37 @@ class Secretary:
                 chat_id, boundary_message_id
             )
         )
+        trace_id = ""
+        if hasattr(event, "get_extra"):
+            trace_id = str(event.get_extra("angelheart_trace_id", "") or "")
+        if self.trace_store is not None and trace_id:
+            self.trace_store.append(
+                trace_id,
+                "secretary_context",
+                "秘书判断上下文",
+                data={
+                    "historical_context": historical_context,
+                    "recent_dialogue": recent_dialogue,
+                    "boundary_message_id": boundary_message_id,
+                    "must_reply": must_reply,
+                    "debounce_kind": debounce_kind,
+                },
+            )
         if not recent_dialogue:
             logger.debug(f"AngelHeart[{chat_id}]: 无新消息需要分析。")
-            return SecretaryDecision(
+            decision = SecretaryDecision(
                 should_reply=False, reply_strategy="无新消息", topic="未知",
                 entities=[], facts=[], keywords=[]
             )
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id,
+                    "decision",
+                    "秘书跳过判断",
+                    status="no_reply",
+                    data=decision.model_dump(),
+                )
+            return decision
 
         # 钉死秘书判断点：主脑 rewrite 必须用同一份切片，禁止组请求时再全量扩窗
         try:
@@ -105,11 +132,20 @@ class Secretary:
         )
 
         # 点名巡检 / 助理防抖放行后必须回复；是否有理由不再影响门闩结果。
+        was_forced = bool(must_reply and not decision.should_reply)
         if must_reply:
             decision.should_reply = True
             if not decision.reply_strategy or decision.reply_strategy == "继续观察":
                 decision.reply_strategy = "必须回应"
 
+        if self.trace_store is not None and trace_id:
+            self.trace_store.append(
+                trace_id,
+                "decision",
+                "秘书最终决策",
+                status="reply" if decision.should_reply else "no_reply",
+                data={"decision": decision.model_dump(), "must_reply_override": was_forced},
+            )
         return decision
 
     async def perform_analysis(
@@ -152,6 +188,11 @@ class Secretary:
                 recent_dialogue=recent_dialogue,
                 chat_id=chat_id,
                 work_ledger_text=work_ledger_text,
+                trace_id=(
+                    str(event.get_extra("angelheart_trace_id", "") or "")
+                    if event is not None and hasattr(event, "get_extra")
+                    else ""
+                ),
             )
 
             return decision

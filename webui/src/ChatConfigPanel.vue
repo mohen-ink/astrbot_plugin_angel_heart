@@ -137,6 +137,72 @@
         </div>
       </template>
 
+      <!-- Agent 全链路追踪 -->
+      <template v-else-if="viewMode === 'traces'">
+        <div class="content-header">
+          <div>
+            <h2>Agent 链路追踪</h2>
+            <span class="content-sub">仅展示显式开启追踪后保存的最近运行记录</span>
+          </div>
+          <n-button size="small" @click="refreshTraces" :loading="tracesLoading">
+            <template #icon><Icon icon="lucide:refresh-cw" /></template>
+            刷新
+          </n-button>
+        </div>
+        <div class="trace-toolbar">
+          <n-input
+            v-model:value="traceChatFilter"
+            clearable
+            placeholder="按会话 ID 筛选"
+            @keyup.enter="refreshTraces"
+          />
+          <n-button secondary @click="refreshTraces">查询</n-button>
+        </div>
+        <div class="trace-layout">
+          <div class="trace-list">
+            <div
+              v-for="item in traces"
+              :key="item.trace_id"
+              class="trace-list-item"
+              :class="{ selected: item.trace_id === selectedTraceId }"
+              @click="selectTrace(item.trace_id)"
+            >
+              <div class="trace-list-title">{{ item.summary || '未命名事件' }}</div>
+              <div class="trace-list-meta">{{ item.chat_id }} · {{ traceTime(item.updated_at) }}</div>
+              <div class="trace-list-meta">{{ item.stage_count }} 个阶段 · {{ traceStatusLabel(item.status) }}</div>
+            </div>
+            <n-empty v-if="!traces.length" description="暂无链路记录；请先在插件设置中开启 Agent 全链路追踪" />
+          </div>
+          <div class="trace-detail">
+            <n-empty v-if="!selectedTrace" description="选择一轮运行查看完整链路" />
+            <template v-else>
+              <div class="trace-detail-head">
+                <div>
+                  <h3>{{ selectedTrace.summary || 'Agent 运行链路' }}</h3>
+                  <div class="trace-list-meta">{{ selectedTrace.chat_id }} · {{ selectedTrace.trace_id }}</div>
+                </div>
+                <span class="status-badge" :class="selectedTrace.status === 'completed' || selectedTrace.status === 'sent' ? 'on' : 'off'">
+                  {{ traceStatusLabel(selectedTrace.status) }}
+                </span>
+              </div>
+              <div class="trace-stage-list">
+                <div v-for="stage in selectedTrace.stages" :key="`${stage.at}-${stage.stage}`" class="trace-stage">
+                  <div class="trace-stage-head">
+                    <strong>{{ stage.title }}</strong>
+                    <div class="trace-stage-actions">
+                      <span class="trace-list-meta">{{ traceTime(stage.at) }}</span>
+                      <n-button size="tiny" quaternary @click.stop="copyTraceData(stage.data)">复制</n-button>
+                    </div>
+                  </div>
+                  <div class="trace-stage-kind">{{ stage.stage }} · {{ stage.status }}</div>
+                  <pre class="trace-stage-data">{{ prettyTraceData(stage.data) }}</pre>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
       <!-- 全局配置（可编辑）：schema 驱动分段卡片；有草稿变更时右下角浮出保存按钮 -->
       <template v-else-if="!selectedId">
         <div class="content-header">
@@ -253,6 +319,8 @@ import {
   type ChatStatusItem,
   type TemplateDetail,
   type TemplateConfig,
+  type TraceDetail,
+  type TraceSummary,
 } from './fields'
 import { useBridge } from './composables/useBridge'
 import { themeKey } from './theme'
@@ -266,8 +334,13 @@ const { isDark, toggle: toggleTheme } = inject(themeKey)!
 const templates = ref<TemplateDetail[]>([])
 const chats = ref<ChatItem[]>([])
 const statusItems = ref<ChatStatusItem[]>([])
+const traces = ref<TraceSummary[]>([])
+const selectedTrace = ref<TraceDetail | null>(null)
+const selectedTraceId = ref('')
+const traceChatFilter = ref('')
+const tracesLoading = ref(false)
 const kindFilter = ref<'all' | 'group' | 'private'>('all')
-const viewMode = ref<'config' | 'monitor'>('monitor')
+const viewMode = ref<'config' | 'monitor' | 'traces'>('monitor')
 const selectedId = ref<string | null>(null)
 const sidebarCollapsed = ref(false)
 // naive-ui 的 n-layout-sider 没有 breakpoint 属性，用 matchMedia 实现窄屏自动收起
@@ -355,6 +428,7 @@ function renderTemplateLabel(tpl: TemplateDetail) {
 
 const sidebarMenuOptions = computed<MenuOption[]>(() => [
   { label: '联系人监控', key: 'monitor', icon: () => h(Icon, { icon: 'lucide:activity' }) },
+  { label: '链路追踪', key: 'traces', icon: () => h(Icon, { icon: 'lucide:route' }) },
   ...templates.value.map((tpl) => ({
     key: tpl.id,
     icon: () => h(Icon, { icon: 'lucide:file-text' }),
@@ -363,12 +437,19 @@ const sidebarMenuOptions = computed<MenuOption[]>(() => [
 ])
 
 function onSidebarMenu(key: string) {
-  if (key === 'monitor') viewMode.value = 'monitor'
-  else selectTemplate(key)
+  if (key === 'monitor') {
+    viewMode.value = 'monitor'
+  } else if (key === 'traces') {
+    viewMode.value = 'traces'
+    void refreshTraces()
+  } else {
+    selectTemplate(key)
+  }
 }
 
 const sidebarMenuValue = computed(() => {
   if (viewMode.value === 'monitor') return 'monitor'
+  if (viewMode.value === 'traces') return 'traces'
   return selectedId.value
 })
 
@@ -613,6 +694,73 @@ async function refreshStatus() {
     statusItems.value = list || []
   } catch {
     // 轮询失败静默，下次再试
+  }
+}
+
+function traceTime(ts: number): string {
+  if (!ts) return ''
+  const date = new Date(ts * 1000)
+  return `${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
+}
+
+function traceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    running: '运行中',
+    completed: '已完成',
+    sent: '已发送',
+    reply: '已放行',
+    no_reply: '不回复',
+    blocked: '已拦截',
+    error: '异常',
+    not_sent: '未发送',
+  }
+  return labels[status] || status || '未知'
+}
+
+function prettyTraceData(data: unknown): string {
+  if (data === undefined || data === null) return '无附加数据'
+  if (typeof data === 'string') return data
+  try {
+    return JSON.stringify(data, null, 2)
+  } catch {
+    return String(data)
+  }
+}
+
+async function copyTraceData(data: unknown) {
+  try {
+    await navigator.clipboard.writeText(prettyTraceData(data))
+    message.success('已复制')
+  } catch {
+    message.warning('复制失败，请手动选择文本')
+  }
+}
+
+async function refreshTraces() {
+  tracesLoading.value = true
+  try {
+    traces.value = await apiGet<TraceSummary[]>('traces', {
+      chat_id: traceChatFilter.value.trim() || undefined,
+      limit: 100,
+    }) || []
+    if (selectedTraceId.value && !traces.value.some((item) => item.trace_id === selectedTraceId.value)) {
+      selectedTraceId.value = ''
+      selectedTrace.value = null
+    }
+  } catch (e) {
+    message.error(`加载链路记录失败：${String((e as Error)?.message || e)}`)
+  } finally {
+    tracesLoading.value = false
+  }
+}
+
+async function selectTrace(traceId: string) {
+  selectedTraceId.value = traceId
+  try {
+    selectedTrace.value = await apiGet<TraceDetail>(`traces/${encodeURIComponent(traceId)}`)
+  } catch (e) {
+    selectedTrace.value = null
+    message.error(`加载链路详情失败：${String((e as Error)?.message || e)}`)
   }
 }
 
@@ -872,6 +1020,140 @@ onUnmounted(() => {
 
 .status-binding {
   margin-top: 2px;
+}
+
+.trace-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.trace-toolbar .n-input {
+  max-width: 360px;
+}
+
+.trace-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.6fr);
+  gap: 12px;
+  min-height: 480px;
+}
+
+.trace-list,
+.trace-detail {
+  min-width: 0;
+  background: var(--glass-thick-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 10px;
+}
+
+.trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+}
+
+.trace-list-item {
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.trace-list-item:hover,
+.trace-list-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.trace-list-title {
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-list-meta,
+.trace-stage-kind {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.trace-detail {
+  overflow: auto;
+}
+
+.trace-detail-head,
+.trace-stage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.trace-detail-head {
+  border-bottom: 1px solid var(--glass-divider);
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.trace-detail-head h3 {
+  margin: 0 0 3px;
+  color: var(--text-1);
+  font-size: 15px;
+}
+
+.trace-stage-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.trace-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trace-stage {
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--glass-regular-bg);
+  padding: 9px 10px;
+}
+
+.trace-stage-head strong {
+  color: var(--text-1);
+  font-size: 13px;
+}
+
+.trace-stage-data {
+  max-height: 360px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 8px;
+  border-radius: 5px;
+  background: var(--glass-divider);
+  color: var(--text-2);
+  font: 11px/1.5 'Consolas', 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 900px) {
+  .trace-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-list {
+    max-height: 240px;
+  }
 }
 
 /* 悬浮保存按钮：右下角浮出，带玻璃阴影 */

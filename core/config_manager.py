@@ -312,6 +312,10 @@ class ConfigManager:
     def log_context_to_file(self) -> bool:
         return bool(self._get_grouped("debug", "log_context_to_file", False))
 
+    @property
+    def trace_enabled(self) -> bool:
+        return bool(self._get_grouped("debug", "trace_enabled", False))
+
     # ========== 工具方法 ==========
 
     def get_config_summary(self) -> dict:

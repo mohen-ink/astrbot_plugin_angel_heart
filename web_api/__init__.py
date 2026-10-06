@@ -60,6 +60,7 @@ class ProfileAPI:
         status_transition_manager=None,
         debounce_manager=None,
         last_decisions=None,
+        trace_store=None,
     ):
         self.profile_store = profile_store
         self.config_manager = config_manager
@@ -68,6 +69,7 @@ class ProfileAPI:
         self.status_transition_manager = status_transition_manager
         self.debounce_manager = debounce_manager
         self.last_decisions = last_decisions
+        self.trace_store = trace_store
 
     # ---------- 模板 ----------
 
@@ -313,6 +315,24 @@ class ProfileAPI:
             )
         return _ok(items)
 
+    async def list_traces(self):
+        if self.trace_store is None:
+            return _ok([])
+        chat_id = str(request.args.get("chat_id", "") or "").strip()
+        try:
+            limit = int(request.args.get("limit", "50"))
+        except (TypeError, ValueError):
+            limit = 50
+        return _ok(self.trace_store.list(chat_id=chat_id, limit=limit))
+
+    async def get_trace(self, trace_id: str):
+        if self.trace_store is None:
+            return _err("链路追踪未启用", 404)
+        trace = self.trace_store.get(trace_id)
+        if trace is None:
+            return _err("链路记录不存在", 404)
+        return _ok(trace)
+
 
 def register_all_routes(
     context,
@@ -325,6 +345,7 @@ def register_all_routes(
     last_decisions=None,
     config=None,
     plugin=None,
+    trace_store=None,
 ) -> None:
     """注册全部 WebUI API 路由。"""
     api = ProfileAPI(
@@ -335,6 +356,7 @@ def register_all_routes(
         status_transition_manager,
         debounce_manager,
         last_decisions,
+        trace_store,
     )
 
     routes = [
@@ -347,6 +369,8 @@ def register_all_routes(
         ("/astrbot_plugin_angel_heart/chats", api.list_chats, ["GET"], "已知群聊列表"),
         ("/astrbot_plugin_angel_heart/chat_sources", api.list_chat_sources, ["GET"], "来源登记列表"),
         ("/astrbot_plugin_angel_heart/chat_status", api.chat_status, ["GET"], "群聊状态仪表盘"),
+        ("/astrbot_plugin_angel_heart/traces", api.list_traces, ["GET"], "Agent 运行链路列表"),
+        ("/astrbot_plugin_angel_heart/traces/<trace_id>", api.get_trace, ["GET"], "Agent 运行链路详情"),
     ]
 
     if config is not None and plugin is not None:

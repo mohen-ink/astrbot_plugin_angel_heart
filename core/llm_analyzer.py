@@ -70,6 +70,7 @@ class LLMAnalyzer:
         self.context = context  # 存储 context 对象，用于动态获取 provider
         self.strategy_guide = strategy_guide or ""  # 存储策略指导文本
         self.config_manager = config_manager  # 存储 config_manager 对象，用于访问配置
+        self.trace_store = None
         self.is_ready = False  # 默认认为分析器未就绪
 
         # 初始化提示词模块加载器
@@ -253,6 +254,7 @@ class LLMAnalyzer:
         recent_dialogue: List[Dict],
         chat_id: str,
         work_ledger_text: str = "",
+        trace_id: str = "",
     ) -> SecretaryDecision:
         """
         分析对话历史，做出结构化的决策 (JSON)
@@ -262,6 +264,10 @@ class LLMAnalyzer:
         alias = cm.alias if cm else "AngelHeart"
 
         if not self.analyzer_model_name:
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id, "analyzer_skipped", "未配置分析模型", status="skipped"
+                )
             logger.debug("AngelHeart分析器: 分析模型未配置, 跳过分析。")
             # 返回一个默认的不参与决策
             return SecretaryDecision(
@@ -270,6 +276,10 @@ class LLMAnalyzer:
             )
 
         if not self.is_ready:
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id, "analyzer_skipped", "分析器未就绪", status="skipped"
+                )
             logger.debug("AngelHeart分析器: 由于核心Prompt模板丢失，分析器已禁用。")
             return SecretaryDecision(
                 should_reply=False,
@@ -289,6 +299,10 @@ class LLMAnalyzer:
 
         # 2. 增强检查：如果生成的提示词为空，则记录警告日志并返回一个明确的决策
         if not prompt:
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id, "analyzer_skipped", "分析 Prompt 为空", status="skipped"
+                )
             logger.warning(
                 "AngelHeart分析器: 生成的分析提示词为空，将返回'分析内容为空'的决策。"
             )
@@ -299,12 +313,43 @@ class LLMAnalyzer:
                 entities=[], facts=[], keywords=[]
             )
 
+        if self.trace_store is not None and trace_id:
+            self.trace_store.append(
+                trace_id,
+                "analyzer_prompt",
+                "秘书分析模型 Prompt",
+                data={"prompt": prompt},
+            )
         response_text = ""
         try:
             response_text = await self._call_ai_model(prompt, chat_id)
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id,
+                    "analyzer_response",
+                    "秘书分析模型原始响应",
+                    data={"response": response_text},
+                )
             # 调用新方法解析和验证响应，并传递 alias
-            return self._parse_response(response_text, alias, chat_id)
+            decision = self._parse_response(response_text, alias, chat_id)
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id,
+                    "analyzer_decision",
+                    "解析与规则校验后的判断",
+                    status="reply" if decision.should_reply else "no_reply",
+                    data=decision.model_dump(),
+                )
+            return decision
         except (json.JSONDecodeError, KeyError) as e:
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id,
+                    "analyzer_parse_error",
+                    "分析响应解析异常",
+                    status="error",
+                    data={"error": str(e), "response": response_text},
+                )
             logger.warning(
                 f"AngelHeart分析器: AI返回的JSON格式或内容有误: {e}. 原始响应: {response_text[:200]}..."
             )
@@ -312,6 +357,14 @@ class LLMAnalyzer:
             # 重新抛出 CancelledError，以确保异步任务可以被正常取消
             raise
         except Exception as e:
+            if self.trace_store is not None and trace_id:
+                self.trace_store.append(
+                    trace_id,
+                    "analyzer_error",
+                    "分析模型调用异常",
+                    status="error",
+                    data={"error": str(e)},
+                )
             logger.error(
                 f"💥 AngelHeart分析器: 轻量级AI分析失败: {e}",
                 exc_info=True,
