@@ -721,7 +721,11 @@ function prettyTraceData(data: unknown): string {
   if (data === undefined || data === null) return '无附加数据'
   if (typeof data === 'string') return data
   try {
+    // JSON.stringify 会把 Prompt 内的真实换行显示成字面量 \\n；还原后更适合阅读。
     return JSON.stringify(data, null, 2)
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
   } catch {
     return String(data)
   }
